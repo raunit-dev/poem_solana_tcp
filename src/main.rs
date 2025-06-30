@@ -1,21 +1,19 @@
 use poem::{
     Route, Server, get, handler,
     listener::TcpListener,
-    post,
-    web::{Json, Path},
+    web::Json,
 };
 use solana_client::rpc_client::RpcClient;
-use solana_program::{hash::hash, pubkey::Pubkey, system_instruction::transfer};
+use solana_program::{hash::hash, pubkey::Pubkey, system_instruction::transfer, account_info::Account};
 
 use solana_sdk::{
-    message::Message,
-    native_token::LAMPORTS_PER_SOL,
-    signature::{Keypair, Signer, read_keypair_file},
-    transaction::Transaction,
+    account_info::AccountInfo, client, commitment_config::CommitmentConfig, message::Message, native_token::LAMPORTS_PER_SOL, signature::{read_keypair_file, Keypair, Signer}, system_instruction, system_program, transaction::Transaction
 };
+
 const RPC_URL: &str = "https://api.devnet.solana.com";
+
 use serde::{Deserialize, Serialize};
-use std::{str::FromStr, time::Duration};
+use std::time::Duration;
 use std::thread;
 
 #[derive(Serialize, Deserialize)]
@@ -43,6 +41,30 @@ pub struct GetAirdropRespose {
     pub new_balance_lamports: u64,
     pub new_balance_sol: f64,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct Transfer {
+    pub from_wallet: String,
+    pub to_wallet: String,
+    pub amount_sol: u64,
+    pub from_private_key: String,
+}
+
+
+#[derive(Serialize, Deserialize)]
+pub struct GetAccountInfo {
+    pub wallet: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GetAccountInfoResponse {
+    pub wallet: String,
+    pub lamports: u64,
+    pub data: Vec<u8>,
+    pub owner: Pubkey,
+    pub executable: bool,
+}
+
 
 #[handler]
 fn get_balance(Json(data): Json<GetBalance>) -> Json<GetBalanceRespose> {
@@ -88,11 +110,82 @@ fn get_airdrop(Json(data): Json<GetAirdrop>) -> Json<GetAirdropRespose> {
     })
 }
 
+#[handler]
+pub fn get_account_info(Json(data): Json<GetAccountInfo>) -> Json<GetAccountInfoResponse> {
+
+    const MAIN_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+
+    let wallet_add = data.wallet;
+
+    let wallet = wallet_add.parse::<Pubkey>().unwrap();
+
+    let client = RpcClient::new_with_commitment(
+        String::from(MAIN_RPC_URL),
+        CommitmentConfig::confirmed()
+    );
+
+    let account = client.get_account(&wallet).unwrap();
+
+    Json(GetAccountInfoResponse {
+        wallet: wallet_add,
+        lamports: account.lamports,
+        data: account.data,
+        owner: account.owner,
+        executable: account.executable,
+    })
+}
+
+#[handler]
+pub fn transfer_sol_devnet(Json(data): Json<Transfer>) -> Json<Transfer> {
+    let from_wallet = data.from_wallet;
+    let to_wallet = data.to_wallet;
+    let transfer_amount = data.amount_sol;
+    let from_private_key = data.from_private_key;
+
+    let from_pubkey = from_wallet.parse::<Pubkey>().unwrap();
+    let to_pubkey = to_wallet.parse::<Pubkey>().unwrap();
+    
+    // Assuming the private key is a JSON array string (as exported by Solana CLI)
+    let secret_bytes: Vec<u8> = serde_json::from_str(&from_private_key).expect("Invalid private key format");
+    let from_signer = Keypair::from_bytes(&secret_bytes).expect("Failed to create keypair from bytes");
+
+    let rpc_client = RpcClient::new(RPC_URL);
+
+    let recent_blockhash = rpc_client.get_latest_blockhash().expect("Failed to get recent blockhash");
+
+    let transfer_ix = Transaction::new_signed_with_payer(
+        &[transfer(
+            &from_pubkey,
+            &to_pubkey,
+            transfer_amount
+        )],
+        Some(&from_pubkey),
+        &vec![&from_signer],
+        recent_blockhash
+    );
+
+    let signature = rpc_client.send_and_confirm_transaction(&transfer_ix).expect("Failed to send transaction");
+
+    println!(
+        "Success! Check out your TX here: https://explorer.solana.com/tx/{}/?cluster=devnet",
+        signature
+    );
+
+    Json(Transfer {
+        from_wallet,
+        to_wallet,
+        amount_sol: transfer_amount,
+        from_private_key
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     let app = Route::new()
         .at("/get_balance", get(get_balance))
-        .at("/get_airdrop", get(get_airdrop));
+        .at("/get_airdrop", get(get_airdrop))
+        .at("/transfer_sol_devnet", get(transfer_sol_devnet))
+        .at("/get_account_info", get(get_account_info));
 
     Server::new(TcpListener::bind("0.0.0.0:3000"))
         .name("hello-world")
